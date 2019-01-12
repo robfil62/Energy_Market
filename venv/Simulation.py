@@ -1,20 +1,20 @@
-from multiprocessing import Process,Queue,Lock,Value,Event,Array,Pipe
+from multiprocessing import Process,Queue,Lock,Value,Event,Pipe,Array
 import  threading
 import time
 import random
-import multiprocessing
 import sys
 
 
-nmbHome=3 #Définit le nombre de maisons
-nmbTour=3  #Définit le nombre de tour avant l'arrêt de la simulation
+nmbHome=10 #Définit le nombre de maisons
+nmbTour=30 #Définit le nombre de tour avant l'arrêt de la simulation
 delai=2 #Définit le temps d'attente entre chaque top d'horloge
 starting_price=0.145    #Prix initiale
-
+scale_En=0.10
+scale_Pr=0.5
 #Pour le calcul du prix :
 gamma=0.99  #Coefficient influence du prix précédent
-alpha=0.25  #Coefficient influence de la température
-beta=0.25   #Coefficient influence du vent
+alpha=0.05  #Coefficient influence de la température
+beta=0.05   #Coefficient influence du vent
 theta=0.05  #Coefficient influence des échanges au tour précédent
 delta=0.5   #Coefficient influence nouvelle énergie
 epsilon=0.5 #Coefficient influence conflit
@@ -31,12 +31,12 @@ def Home(ID,lockQueue,lockCount,queue,count,market_OK,lockWrite,clock_ok,temp,wi
         neg_Flag = False
 
         weather_ok.wait()
-        Prod = random.randrange(1.0, 10.0) *wind[1]  #Production aléatoire (événements aléatoire dans la maison) * influence du vent
-        Cons = random.randrange(1.0, 10.0) *temp[1]  #Consommation aléatoire (événements aléatoire dans la maison) * influence de la température (inversement proportionnel)
-        Energy_Bal = Prod - Cons  # Calcul de Energy_Balance pour chaque Home
+        Prod =random.randrange(1.0,10.0)*wind[1]  #Production aléatoire (événements aléatoire dans la maison) * influence du vent
+        Cons = random.randrange(1.0,10.0)*temp[1]  #Consommation aléatoire (événements aléatoire dans la maison) * influence de la température (inversement proportionnel)
+        Energy_Bal = Prod-Cons  # Calcul de Energy_Balance pour chaque Home
 
         with lockQueue:
-            q_Term.put([Id,Energy_Bal,Money_Bal])
+            q_Term.put([Id,Energy_Bal])
 
         if Energy_Bal < 0:  # Si Home en déficit :
             with lockQueue:
@@ -63,20 +63,15 @@ def Home(ID,lockQueue,lockCount,queue,count,market_OK,lockWrite,clock_ok,temp,wi
 
                     if abs(demande[1]) <= Energy_Bal:  # Si la demande est réalisable:
                         Energy_Bal = Energy_Bal - abs(demande[1])  # Donne son énergie à la maison
-
                         queue_echanges.put([Id,abs(demande[1]),demande[0]])
 
                     else:  # Si la demande est trop importante :
                         queue.put([demande[0],demande[1] + Energy_Bal])  # Donne son énergie restante et replace la demande mise à jour
-
                         queue_echanges.put([Id,Energy_Bal,demande[0]])
-
                         Energy_Bal = 0  # Son énergie devient nulle
-
 
         with lockCount:
             count.value += 1  # Annonce qu'elle a fini de donner son énergie
-
 
         while count.value < 2 * nmbHome:  # Attend toutes les Homes
             True
@@ -101,7 +96,7 @@ def Home(ID,lockQueue,lockCount,queue,count,market_OK,lockWrite,clock_ok,temp,wi
                 Energy_Bal = 0  # Sa demande a été traitée entiérement, donc son Energy_Bal passe à 0
 
         with lockQueue:
-            q_Term.put([Id, Energy_Bal, Money_Bal])
+            q_Term.put([Id, Energy_Bal])
 
 
 
@@ -142,17 +137,10 @@ def Home(ID,lockQueue,lockCount,queue,count,market_OK,lockWrite,clock_ok,temp,wi
         count.value=0   #Réinitialisation du compteur ici, car il ne sera plus modifié dans ce tour d'horloge
 
         with lockQueue:
-            q_Term.put([Id,Energy_Bal,Money_Bal])
+            q_Term.put([Id,Money_Bal])
 
 
-
-
-
-
-
-
-
-def Market(queue,count,market_OK,clock_ok,temp,wind,markt_conn):
+def Market(queue,count,market_OK,clock_ok,temp,wind,mrkt_conn,weather_ok):
     currentPrice=starting_price
     moy_exchange=0.0
     Exchange=0.0
@@ -164,9 +152,9 @@ def Market(queue,count,market_OK,clock_ok,temp,wind,markt_conn):
 
     while clock_ok.wait(1.5 * delai):  # Attend le top au maximum pendant 1.5 fois le delai
         market_OK.value=False        #Annonce qu'il n'a pas mis à jour la queue avec les prix
-
-
         event=market_conn.recv()
+
+        weather_ok.wait()
 
         internal=alpha*temp[1]+beta*wind[1]-theta*moy_exchange #Calcul les effets internes(weather+echanges au tour précédent)
         external = event[1]*event[2] #Calcul les effets externes
@@ -174,13 +162,11 @@ def Market(queue,count,market_OK,clock_ok,temp,wind,markt_conn):
 
         if currentPrice<0.02:
             currentPrice=0.02
-            print("#########NEGATIF###########")
 
         if currentPrice>2:
             currentPrice=2.0
-            print("##########SUPERIEUR##########")
 
-        markt_conn.send([currentPrice,event[0],event[1],event[2]])
+        mrkt_conn.send([currentPrice,event[0],event[1],event[2],moy_exchange])
 
         while count.value<3*nmbHome:    #Attend que toutes les homes aient mis leurs demandes pour le marché dans le queue
             True
@@ -206,6 +192,7 @@ def Market(queue,count,market_OK,clock_ok,temp,wind,markt_conn):
         except:
             moy_exchange=0
 
+
     e.join()
 
 def Clock(clock_ok,):
@@ -220,12 +207,13 @@ def Clock(clock_ok,):
     #os.kill(0,signal.SIGTERM)
 
 
-def Weather(temp,wind,clock_ok,weather_ok):
+def Weather(temp,wind,clock_ok,weather_ok,weather_conn):
     temp[0] = alpha #coef influence temperature
     wind[0] = beta  #coef influence vent
     while clock_ok.wait(1.5*delai): #Attend le top au maximum pendant 1.5 fois le delai
-        temp[1]=round(random.gauss(10.0,5.0),2)    #Température au tour actuel (99% entre -5 et 25 degrés)
-        wind[1]=round(random.gauss(20.0,5.0),2)    #Vent au tour actuel (99% entre 5.0 et 35.0 km/h)
+        temp[1]=random.gauss(10.0,5.0)  #Température au tour actuel (99% entre -5 et 25 degrés)
+        wind[1]=random.gauss(20.0,5.0)    #Vent au tour actuel (99% entre 5.0 et 35.0 km/h)
+        weather_conn.send([temp[1],wind[1]])
 
         temp[1]=1/((temp[1]+6.0)/(15.0+6.0)) #On ne veut que des valeurs positives (donc +6) et on estime qu'une température <= à 15°C est idéal pour la consommation
         wind[1]=(wind[1])/20.0  #On estime qu'un vent soufflant à plus de 20.0km/h est idéal pour la production
@@ -251,7 +239,7 @@ def External(external_conn,clock_ok):
             external_conn.send(["None",0,0])
 
 
-def terminal(q,count,clock_ok,queue_echanges,term_conn):
+def terminal(q,count,clock_ok,queue_echanges,term_conn,term_conn2):
     jour=1
 
     while clock_ok.wait(1.5*delai):
@@ -281,16 +269,16 @@ def terminal(q,count,clock_ok,queue_echanges,term_conn):
             tab4.append(b)
         tab4=trie(tab4)
 
-        thread=threading.Thread(target=affiche,args=(tab1,jour,tab4,term_conn.recv()))
+        thread=threading.Thread(target=affiche,args=(tab1,jour,tab4,term_conn.recv(),term_conn2.recv()))
         thread.start()
         thread.join()
         jour+=1
 
 def trie(t):
-
     tab_av=[]
     tab=[]
     tab_ap=[]
+
     if len(t)>1:
         pivot=t[0]
         for i in t:
@@ -306,56 +294,59 @@ def trie(t):
         return t
 
 
-def affiche(t,j,t2,m):
-        print("                     ~~~~~~~~~~~~~~~~ JOUR", j, "~~~~~~~~~~~~~~~~")
-        print("Temperature :", ,"°C  |  Wind :", ,"km/h")
-        print("Price :",m[0],"€/kW  |  Event :",m[1], "--> Modification Price :", m[2]*m[3],"€/kW")
+def affiche(t,j,t2,m,w):
+
+        print("################################################################## DAY", j, "##################################################################")
+        print("")
+        print("Temperature :", round(w[0],3) ,"°C --> Modification :",round(alpha/((w[0]+6.0)/(15.0+6.0)),3),"€/kW |  Wind :", round(w[1],3) ,"km/h --> Modification :",round((beta*w[1]/20.0),3),"€/kW")
+        print("Average purchases/sales day",j-1,":",round(m[4],3),"kW --> Modification :",round((-theta*m[4]),3),"€/kW" )
+        print("Price :",round(m[0],3),"€/kW  |  Event :",m[1], "--> Modification Price :", round(m[2]*m[3],3),"€/kW")
+        print("_____________________________________________________________________")
         print("")
         for j in range(0,3):
             for i in range(j*nmbHome,j*nmbHome+nmbHome):
-                nmbSymb=int(t[i][1]/0.5)
-                if t[i][1]>=0:
-                    print("#Energy Home", t[i][0], ":",end=' ')
-                    for k in range(0,nmbSymb):
-                        sys.stdout.write('+')
+                nmbSymb=int(t[i][1]/scale_En)
+                if j!=2:
+                    if t[i][1]>=scale_En:
+                        print("Energy Home", t[i][0], ":",end=' ')
+                        for k in range(0,nmbSymb):
+                            sys.stdout.write('+')
+                        sys.stdout.flush()
 
-                    sys.stdout.flush()
+                    elif t[i][1]<=-scale_En:
+                        print("Energy Home", t[i][0], ":",end=' ' )
+                        for k in range(0, abs(nmbSymb)):
+                            sys.stdout.write('-')
+                        sys.stdout.flush()
 
-                if t[i][1]<0:
-                    print("#Energy Home", t[i][0], ":",end=' ' )
-                    for k in range(0, abs(nmbSymb)):
-                        sys.stdout.write('-')
+                    else:
+                        print("Energy Home", t[i][0], ": .",end=' ')
 
-                    sys.stdout.flush()
+                    print(" ",round(t[i][1],3),"kW")
 
-                print(" ",t[i][1],"kW")
+                nmbSymb=int(t[i][1]/scale_Pr)
+                if j==2:
+                    if t[i][1] >=scale_Pr:
+                        print("Money Home", t[i][0], ":", end=' ')
+                        for k in range(0, nmbSymb):
+                            sys.stdout.write('+')
+                        sys.stdout.flush()
 
-                nmbSymb=int(t[i][2]/0.5)
+                    elif t[i][1] <=-scale_Pr:
+                        print("Money Home", t[i][0], ":",end=' ' )
+                        for k in range(0, abs(nmbSymb)):
+                            sys.stdout.write('-')
+                        sys.stdout.flush()
 
-                if t[i][2] >= 0:
-                    print("Money Home", t[i][0], ":", end=' ')
-                    for k in range(0, nmbSymb):
-                        sys.stdout.write('+')
+                    else :
+                        print("Money Home", t[i][0], ": .", end=' ')
 
-                    sys.stdout.flush()
+                    print(" ",round(t[i][1],3),"€")
+            print("_____________________________________________________________________")
 
-                if t[i][2] < 0:
-                    print("Money Home", t[i][0], ":",end=' ' )
-                    for k in range(0, abs(nmbSymb)):
-                        sys.stdout.write('-')
-
-                    sys.stdout.flush()
-
-                print(" ",t[i][2],"€")
-
-
-
-
-
-            print("************************")
             if j==0 and len(t2)!=0:
                 for k in range(0,len(t2)):
-                    print("                 ///// Home",t2[k][0],"gives",t2[k][1],"kW to home",t2[k][2],"/////")
+                    print("////////// Home",t2[k][0],"gives",round(t2[k][1],3),"kW to home",t2[k][2],"//////////")
                 print((" "))
 
 
@@ -380,7 +371,9 @@ if __name__=="__main__":
     wind=Array('f',range(2))
     market_OK=Value('b',False)
 
-    term_conn, markt_conn =Pipe()
+    term_conn, markt_conn, = Pipe()
+    term_conn2, weather_conn =Pipe()
+
 
     Homes=[]
 
@@ -399,13 +392,13 @@ if __name__=="__main__":
 
         Homes.append(h)
 
-    t=Process(target=terminal,args=(q,count,clock_ok,queue_echange,term_conn))
+    t=Process(target=terminal,args=(q,count,clock_ok,queue_echange,term_conn,term_conn2))
     t.start()
 
-    m=Process(target=Market, args=(queue,count,market_OK,clock_ok,temp,wind,markt_conn))
+    m=Process(target=Market, args=(queue,count,market_OK,clock_ok,temp,wind,markt_conn,weather_ok))
     m.start()
 
-    w=Process(target=Weather,args=(temp,wind,clock_ok,weather_ok))
+    w=Process(target=Weather,args=(temp,wind,clock_ok,weather_ok,weather_conn))
     w.start()
 
     c = Process(target=Clock, args=(clock_ok,))
